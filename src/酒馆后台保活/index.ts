@@ -161,21 +161,47 @@ if (typeof jq !== 'function') {
     state.audio_state = audioContext.state === 'running' ? 'running' : 'suspended';
   };
 
-  const gestureEvents: Array<keyof WindowEventMap> = ['pointerdown', 'keydown', 'touchstart'];
+  const gestureEvents = ['pointerdown', 'mousedown', 'keydown', 'touchstart', 'click'];
+  const gestureTargets = new Set<EventTarget>([window, document]);
+
+  try {
+    if (window.parent && window.parent !== window) {
+      gestureTargets.add(window.parent);
+      gestureTargets.add(window.parent.document);
+    }
+  } catch {
+    // ignore cross-origin access
+  }
+
+  try {
+    if (window.top && window.top !== window) {
+      gestureTargets.add(window.top);
+      gestureTargets.add(window.top.document);
+    }
+  } catch {
+    // ignore cross-origin access
+  }
 
   const handleGesture = () => {
     void startAudioKeepAlive();
   };
 
   const removeGestureListeners = () => {
-    gestureEvents.forEach(eventType => {
-      window.removeEventListener(eventType, handleGesture, true);
+    gestureTargets.forEach(target => {
+      gestureEvents.forEach(eventType => {
+        target.removeEventListener(eventType, handleGesture as EventListener, true);
+      });
     });
   };
 
   const addGestureListeners = () => {
-    gestureEvents.forEach(eventType => {
-      window.addEventListener(eventType, handleGesture, { capture: true });
+    gestureTargets.forEach(target => {
+      gestureEvents.forEach(eventType => {
+        target.addEventListener(eventType, handleGesture as EventListener, {
+          capture: true,
+          passive: true,
+        });
+      });
     });
   };
 
