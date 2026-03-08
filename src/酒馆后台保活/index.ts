@@ -176,7 +176,7 @@ if (typeof jq !== 'function') {
         gainNode = audioContext.createGain();
         oscillator.type = 'sine';
         oscillator.frequency.value = 36;
-        gainNode.gain.value = 0.00001;
+        gainNode.gain.value = 0.02;
 
         oscillator.connect(gainNode);
         gainNode.connect(audioContext.destination);
