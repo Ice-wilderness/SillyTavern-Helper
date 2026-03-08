@@ -12,7 +12,7 @@ const toast = ((window as any).toastr ?? (window.parent as any).toastr) as
     }
   | undefined;
 
-type AudioKeepAliveState = 'pending_gesture' | 'running' | 'suspended' | 'unsupported' | 'failed';
+type AudioKeepAliveState = 'pending_auto' | 'running' | 'suspended' | 'unsupported' | 'failed';
 
 type KeepAliveState = {
   started_at: number;
@@ -46,7 +46,7 @@ if (typeof jq !== 'function') {
     last_freeze_gap_ms: 0,
     max_freeze_gap_ms: 0,
     hidden_since: document.visibilityState === 'hidden' ? started_at : null,
-    audio_state: 'pending_gesture',
+    audio_state: 'pending_auto',
   };
 
   const stop_list: Array<() => void> = [];
@@ -161,49 +161,6 @@ if (typeof jq !== 'function') {
     state.audio_state = audioContext.state === 'running' ? 'running' : 'suspended';
   };
 
-  const gestureEvents = ['pointerdown', 'mousedown', 'keydown', 'touchstart', 'click'];
-  const gestureTargets = new Set<EventTarget>([window, document]);
-
-  try {
-    if (window.parent && window.parent !== window) {
-      gestureTargets.add(window.parent);
-      gestureTargets.add(window.parent.document);
-    }
-  } catch {
-    // ignore cross-origin access
-  }
-
-  try {
-    if (window.top && window.top !== window) {
-      gestureTargets.add(window.top);
-      gestureTargets.add(window.top.document);
-    }
-  } catch {
-    // ignore cross-origin access
-  }
-
-  const handleGesture = () => {
-    void startAudioKeepAlive();
-  };
-
-  const removeGestureListeners = () => {
-    gestureTargets.forEach(target => {
-      gestureEvents.forEach(eventType => {
-        target.removeEventListener(eventType, handleGesture as EventListener, true);
-      });
-    });
-  };
-
-  const addGestureListeners = () => {
-    gestureTargets.forEach(target => {
-      gestureEvents.forEach(eventType => {
-        target.addEventListener(eventType, handleGesture as EventListener, {
-          capture: true,
-          passive: true,
-        });
-      });
-    });
-  };
 
   const startAudioKeepAlive = async () => {
     if (!AudioContextConstructor) {
@@ -251,7 +208,6 @@ if (typeof jq !== 'function') {
       syncAudioState();
 
       if (state.audio_state === 'running') {
-        removeGestureListeners();
         logInfo('音频增强层已启用');
         toast?.success?.('后台保活音频增强层已启用');
       } else {
@@ -268,9 +224,8 @@ if (typeof jq !== 'function') {
     state.audio_state = 'unsupported';
     logWarn('当前环境不支持 AudioContext，跳过音频增强层');
   } else {
-    addGestureListeners();
-    stop_list.push(removeGestureListeners);
-    toast?.info?.('点击页面一次可启用后台保活音频增强层');
+    void startAudioKeepAlive();
+    toast?.info?.('正在自动启用后台保活音频增强层');
   }
 
   const onVisibilityChange = () => {
