@@ -54,7 +54,7 @@ importers:
         specifier: ^2.0.6
         version: 2.0.6
       lodash:
-        specifier: ^4.17.23
+        specifier: ^4.18.1
         version: 4.18.1
       pinia:
         specifier: ^3.0.4
@@ -72,7 +72,7 @@ importers:
         specifier: ^2.1.4
         version: 2.1.4
       vue:
-        specifier: ^3.5.31
+        specifier: ^3.5.32
         version: 3.5.32(typescript@6.0.0-dev.20250807)
       vue-final-modal:
         specifier: ^4.5.5
@@ -214,7 +214,7 @@ importers:
         specifier: ^6.0.0
         version: 6.0.0(remark@15.0.1)(webpack@5.105.4)
       sass:
-        specifier: ^1.98.0
+        specifier: ^1.99.0
         version: 1.99.0
       sass-loader:
         specifier: ^16.0.7
@@ -232,7 +232,7 @@ importers:
         specifier: ^5.4.0
         version: 5.4.0(webpack@5.105.4)
       ts-loader:
-        specifier: ^9.5.4
+        specifier: ^9.5.7
         version: 9.5.7(typescript@6.0.0-dev.20250807)(webpack@5.105.4)
       ts-node:
         specifier: ^10.9.2
