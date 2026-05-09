@@ -12,3 +12,6 @@ pnpm-debug.log*
 auto-imports.d.ts
 components.d.ts
 src/数据库
+progress.md
+task_plan.md
+findings.md
