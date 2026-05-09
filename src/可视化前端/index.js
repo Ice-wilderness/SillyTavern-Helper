@@ -33,6 +33,8 @@
     let selectedRows = new Map();
     let cachedTableData = null;
     let isMultiSelectMode = false;
+    let highlightedTableNames = new Set();
+    let tableFillApiAvailable = null;
 
     let hideOptionsUntilUpdate = false;
     let lastOptionDataCheck = '';
@@ -50,7 +52,7 @@
             }
             setTimeout(() => { UpdateController._suppressNext = false; }, 2000);
         },
-        handleUpdate: () => {
+        handleUpdate: (_data, meta) => {
             if (UpdateController._suppressNext) {
                 clearTimeout(UpdateController._resetTimer);
                 UpdateController._resetTimer = setTimeout(() => {
@@ -60,6 +62,14 @@
             }
             if (isEditingOrder) return;
             cachedTableData = null;
+            if (meta && meta.source === 'ai_fill' && meta.tableNames) {
+                const config = getConfig();
+                if (config.highlightAiFilledTables) {
+                    meta.tableNames.forEach(n => highlightedTableNames.add(n));
+                }
+            } else {
+                highlightedTableNames.clear();
+            }
             renderInterface(true);
         }
     };
@@ -81,6 +91,7 @@
         titleColor: 'orange',
         gridColumns: (window.innerWidth <= 768 ? 4 : 0),
         showOptionPanel: false,
+        highlightAiFilledTables: false,
         clickOptionToAutoSend: false,
         collapseStyle: 'bar',
         collapsePosition: 'center',
@@ -160,6 +171,17 @@
             $: window.jQuery || w.jQuery,
             getDB: () => w.AutoCardUpdaterAPI || window.AutoCardUpdaterAPI
         };
+    };
+
+    const getTableFillApi = () => {
+        if (tableFillApiAvailable !== null) return tableFillApiAvailable;
+        const api = getCore().getDB();
+        if (api && typeof api.getTableFillRecords === 'function' && typeof api.rollbackTableFillRecord === 'function') {
+            tableFillApiAvailable = api;
+            return api;
+        }
+        tableFillApiAvailable = false;
+        return false;
     };
 
     const getIconForTableName = (name) => {
@@ -582,6 +604,8 @@
                 .acu-nav-btn span { overflow: hidden; text-overflow: ellipsis; }
                 .acu-nav-btn:hover { background: var(--acu-btn-hover); transform: translateY(-2px); }
                 .acu-nav-btn.active { background: var(--acu-btn-active-bg); color: var(--acu-btn-active-text); box-shadow: 0 2px 6px rgba(0,0,0,0.15); }
+                .acu-nav-btn.acu-nav-highlighted { border-color: var(--acu-highlight) !important; box-shadow: 0 0 8px var(--acu-highlight-bg) !important; position: relative; }
+                .acu-nav-btn.acu-nav-highlighted::after { content: ''; position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; background: var(--acu-highlight); border-radius: 50%; }
                 .acu-action-btn { flex: 1; height: 30px; display: flex; align-items: center; justify-content: center; background: var(--acu-btn-bg); border-radius: 8px; color: var(--acu-text-sub); cursor: pointer; border: 1px solid var(--acu-border); transition: all 0.2s; font-size: 10px; }
                 .acu-action-btn:hover { background: var(--acu-btn-hover); color: var(--acu-text-main); transform: scale(1.1); border-color: var(--acu-border); }
                 #acu-btn-save-global:hover { background: var(--acu-btn-active-bg); color: var(--acu-btn-active-text); }
@@ -962,7 +986,246 @@
         }
         return Object.keys(tables).length > 0 ? tables : null;
     };
-    
+
+    const showRollbackModal = () => {
+        const api = getTableFillApi();
+        if (!api) {
+            alert('当前数据库插件版本不支持 AI 填表回滚功能。');
+            return;
+        }
+        const { $ } = getCore();
+        $('.acu-edit-overlay').remove();
+        const config = getConfig();
+
+        const records = api.getTableFillRecords();
+        if (!records || records.length === 0) {
+            alert('暂无 AI 填表记录。');
+            return;
+        }
+
+        const escapeHtml = (str) => {
+            if (str == null) return '';
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        };
+
+        const formatTime = (ts) => {
+            if (!ts) return '未知时间';
+            try { return new Date(ts).toLocaleString(); } catch (e) { return String(ts); }
+        };
+
+        const modeLabels = {
+            manual_single: '手动填单表',
+            manual_full: '手动整楼填表',
+            ai_single: 'AI 填单表',
+            ai_full: 'AI 整楼填表'
+        };
+
+        const modalStyles = `
+        <style>
+            .acu-rollback-overlay {
+                position: fixed !important; top: 0; left: 0; right: 0; bottom: 0;
+                background: rgba(0,0,0,0.5) !important; backdrop-filter: blur(3px);
+                z-index: 2147483647 !important; display: flex !important;
+                align-items: center; justify-content: center;
+                opacity: 0; animation: acuFadeIn 0.2s forwards;
+            }
+            .acu-rollback-dialog {
+                background: var(--acu-bg-panel) !important; color: var(--acu-text-main) !important;
+                border: 1px solid var(--acu-border) !important; display: flex; flex-direction: column;
+                box-shadow: 0 10px 50px rgba(0,0,0,0.3) !important;
+                width: 90%; max-width: 700px; max-height: 75vh; border-radius: 16px;
+                overflow: hidden;
+            }
+            @media (max-width: 768px) {
+                .acu-rollback-dialog { width: 100%; max-width: 100%; height: 70vh; border-radius: 20px 20px 0 0;
+                    position: absolute; bottom: 0; left: 0; margin: 0;
+                    animation: acuSlideUp 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+            }
+            .acu-rb-header { padding: 14px 20px; border-bottom: 1px solid var(--acu-border);
+                display: flex; justify-content: space-between; align-items: center;
+                font-weight: bold; font-size: 14px; }
+            .acu-rb-list { flex: 1; overflow-y: auto; padding: 10px 20px; }
+            .acu-rb-record { border: 1px solid var(--acu-border); border-radius: 10px; margin-bottom: 10px;
+                background: var(--acu-table-head); overflow: hidden; }
+            .acu-rb-rec-header { display: flex; justify-content: space-between; align-items: center;
+                padding: 10px 14px; cursor: pointer; user-select: none; }
+            .acu-rb-rec-header:hover { background: var(--acu-btn-hover); }
+            .acu-rb-rec-info { display: flex; flex-direction: column; gap: 2px; }
+            .acu-rb-rec-title { font-weight: bold; font-size: 13px; }
+            .acu-rb-rec-meta { font-size: 11px; color: var(--acu-text-sub); }
+            .acu-rb-rec-actions { display: flex; gap: 6px; align-items: center; }
+            .acu-rb-btn { background: var(--acu-btn-bg); border: 1px solid var(--acu-border);
+                color: var(--acu-text-main); border-radius: 6px; padding: 4px 10px;
+                cursor: pointer; font-size: 11px; transition: all 0.2s; }
+            .acu-rb-btn:hover { background: var(--acu-btn-hover); }
+            .acu-rb-btn.danger { color: #e74c3c; border-color: #e74c3c; }
+            .acu-rb-btn.danger:hover { background: #e74c3c; color: #fff; }
+            .acu-rb-sheets { padding: 0 14px 10px 14px; display: none; }
+            .acu-rb-sheets.open { display: block; }
+            .acu-rb-sheet { border-top: 1px dashed var(--acu-border); padding: 8px 0; }
+            .acu-rb-sheet-header { display: flex; justify-content: space-between; align-items: center;
+                font-size: 12px; }
+            .acu-rb-sheet-name { font-weight: bold; }
+            .acu-rb-diff-summary { font-size: 11px; color: var(--acu-text-sub);
+                display: flex; gap: 10px; }
+            .acu-diff-added { color: #27ae60; }
+            .acu-diff-removed { color: #e74c3c; }
+            .acu-diff-modified { color: #f39c12; }
+            .acu-rb-diff-detail { display: none; margin-top: 6px; font-size: 11px;
+                background: var(--acu-bg-panel); border-radius: 6px; padding: 8px;
+                max-height: 150px; overflow-y: auto; }
+            .acu-rb-diff-detail.open { display: block; }
+            .acu-rb-diff-row { padding: 3px 0; border-bottom: 1px dotted var(--acu-border); }
+            .acu-rb-diff-label { font-weight: bold; margin-right: 4px; }
+            .acu-rb-empty { text-align: center; padding: 40px; color: var(--acu-text-sub); }
+        </style>`;
+
+        let listHtml = '';
+        records.forEach((rec, idx) => {
+            const tables = Array.isArray(rec.tables) ? rec.tables : [];
+            const totalSheets = tables.length;
+            const recordId = rec.id || idx;
+
+            let sheetRows = '';
+            tables.forEach(t => {
+                const sk = t.sheetKey;
+                const diff = t.diff || {};
+                const counts = diff.counts || {};
+                const added = counts.addedRows || 0;
+                const removed = counts.deletedRows || 0;
+                const modified = counts.modifiedCells || 0;
+
+                let diffDetailHtml = '';
+                const modifiedCells = Array.isArray(diff.modifiedCells) ? diff.modifiedCells : [];
+                if (modifiedCells.length > 0) {
+                    diffDetailHtml += modifiedCells.map(mc =>
+                        `<div class="acu-rb-diff-row"><span class="acu-diff-modified acu-rb-diff-label">[修改]</span>行${mc.rowIndex}, 列"${escapeHtml(mc.header)}": <span style="text-decoration:line-through;color:#e74c3c">${escapeHtml(mc.before != null ? String(mc.before) : '空')}</span> → <span style="color:#27ae60">${escapeHtml(mc.after != null ? String(mc.after) : '空')}</span></div>`
+                    ).join('');
+                }
+                const addedRows = Array.isArray(diff.addedRows) ? diff.addedRows : [];
+                if (addedRows.length > 0) {
+                    diffDetailHtml += addedRows.map(ar => {
+                        const cells = Array.isArray(ar.cells) ? ar.cells.map(c => `${escapeHtml(c.header)}: ${escapeHtml(c.value != null ? String(c.value) : '空')}`).join(', ') : '';
+                        return `<div class="acu-rb-diff-row"><span class="acu-diff-added acu-rb-diff-label">[新增行]</span>行${ar.rowIndex}: ${cells}</div>`;
+                    }).join('');
+                }
+                const deletedRows = Array.isArray(diff.deletedRows) ? diff.deletedRows : [];
+                if (deletedRows.length > 0) {
+                    diffDetailHtml += deletedRows.map(dr => {
+                        const cells = Array.isArray(dr.cells) ? dr.cells.map(c => `${escapeHtml(c.header)}: ${escapeHtml(c.value != null ? String(c.value) : '空')}`).join(', ') : '';
+                        return `<div class="acu-rb-diff-row"><span class="acu-diff-removed acu-rb-diff-label">[删除行]</span>行${dr.rowIndex}: ${cells}</div>`;
+                    }).join('');
+                }
+
+                sheetRows += `
+                <div class="acu-rb-sheet">
+                    <div class="acu-rb-sheet-header">
+                        <span class="acu-rb-sheet-name">${escapeHtml(t.tableName || sk)}</span>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <span class="acu-rb-diff-summary">
+                                ${added > 0 ? `<span class="acu-diff-added">+${added} 行</span>` : ''}
+                                ${removed > 0 ? `<span class="acu-diff-removed">-${removed} 行</span>` : ''}
+                                ${modified > 0 ? `<span class="acu-diff-modified">~${modified} 格</span>` : ''}
+                                ${added === 0 && removed === 0 && modified === 0 ? '<span>无变更</span>' : ''}
+                            </span>
+                            ${added + removed + modified > 0 ? `<button class="acu-rb-btn acu-rb-toggle-detail" data-rec="${recordId}" data-sheet="${escapeHtml(sk)}">展开</button>` : ''}
+                            <button class="acu-rb-btn danger acu-rb-rollback-single" data-rec="${recordId}" data-sheet="${escapeHtml(sk)}">回滚此表</button>
+                        </div>
+                    </div>
+                    ${diffDetailHtml ? `<div class="acu-rb-diff-detail" id="rb-detail-${recordId}-${escapeHtml(sk).replace(/[^a-zA-Z0-9]/g, '_')}">${diffDetailHtml}</div>` : ''}
+                </div>`;
+            });
+
+            listHtml += `
+            <div class="acu-rb-record">
+                <div class="acu-rb-rec-header" data-rec="${recordId}">
+                    <div class="acu-rb-rec-info">
+                        <span class="acu-rb-rec-title">${escapeHtml(rec.aiFloor != null ? '第 ' + rec.aiFloor + ' 楼' : '第 ' + (rec.messageIndex + 1) + ' 楼')}</span>
+                        <span class="acu-rb-rec-meta">${formatTime(rec.createdAt)} · ${modeLabels[rec.mode] || rec.mode || '未知模式'} · ${totalSheets} 张表</span>
+                    </div>
+                    <div class="acu-rb-rec-actions">
+                        <button class="acu-rb-btn danger acu-rb-rollback-all" data-rec="${recordId}" onclick="event.stopPropagation()">回滚整楼</button>
+                        <i class="fa-solid fa-chevron-down acu-rb-chevron" style="font-size:12px;color:var(--acu-text-sub);transition:transform 0.2s;margin-left:4px;"></i>
+                    </div>
+                </div>
+                <div class="acu-rb-sheets" id="rb-sheets-${recordId}">
+                    ${sheetRows}
+                </div>
+            </div>`;
+        });
+
+        const dialog = $(`
+            <div class="acu-rollback-overlay acu-edit-overlay">
+                ${modalStyles}
+                <div class="acu-rollback-dialog acu-theme-${config.theme}">
+                    <div class="acu-rb-header">
+                        <span>AI 填表记录与回滚</span>
+                        <button class="acu-close-pill" id="rb-close">关闭</button>
+                    </div>
+                    <div class="acu-rb-list">
+                        ${listHtml || '<div class="acu-rb-empty">暂无记录</div>'}
+                    </div>
+                </div>
+            </div>
+        `);
+
+        $('body').append(dialog);
+
+        const close = () => dialog.remove();
+        dialog.find('#rb-close').on('click', close);
+        dialog.on('click', function(e) { if ($(e.target).hasClass('acu-rollback-overlay')) close(); });
+
+        dialog.find('.acu-rb-rec-header').on('click', function(e) {
+            if ($(e.target).closest('button').length) return;
+            const recId = $(this).data('rec');
+            const $sheets = dialog.find('#rb-sheets-' + recId);
+            const $chevron = $(this).find('.acu-rb-chevron');
+            $sheets.toggleClass('open');
+            $chevron.css('transform', $sheets.hasClass('open') ? 'rotate(180deg)' : '');
+        });
+
+        dialog.find('.acu-rb-toggle-detail').on('click', function(e) {
+            e.stopPropagation();
+            const recId = $(this).data('rec');
+            const sheet = $(this).data('sheet').replace(/[^a-zA-Z0-9]/g, '_');
+            const $detail = dialog.find('#rb-detail-' + recId + '-' + sheet);
+            const isOpen = $detail.hasClass('open');
+            $detail.toggleClass('open');
+            $(this).text(isOpen ? '展开' : '收起');
+        });
+
+        const doRollback = async (recordId, sheetKey) => {
+            const targetDesc = sheetKey ? '"' + sheetKey + '" 表' : '整楼全部表格';
+            if (!confirm('确认回滚 ' + targetDesc + ' 到该 AI 填表前的状态？\n\n此操作不可撤销，请确认。')) return;
+            try {
+                const options = sheetKey ? { recordId, sheetKey } : { recordId };
+                const result = await api.rollbackTableFillRecord(options);
+                if (result && result.error) {
+                    alert('回滚失败: ' + result.error);
+                } else if (result && result.success === false) {
+                    alert('回滚失败: ' + (result.error || '未知错误'));
+                } else {
+                    highlightedTableNames.clear();
+                    cachedTableData = null;
+                    renderInterface(true);
+                    close();
+                }
+            } catch (e) {
+                alert('回滚异常: ' + e.message);
+            }
+        };
+
+        dialog.find('.acu-rb-rollback-single').on('click', function(e) {
+            e.stopPropagation();
+            doRollback($(this).data('rec'), $(this).data('sheet'));
+        });
+
+        dialog.find('.acu-rb-rollback-all').on('click', function(e) {
+            e.stopPropagation();
+            doRollback($(this).data('rec'), null);
+        });
+    };
+
     const showSettingsModal = () => {
         const { $ } = getCore();
         $('.acu-edit-overlay').remove();
@@ -1282,6 +1545,14 @@
                                         <span class="acu-slider-switch"></span>
                                     </label>
                                 </div>
+                            </div><div class="acu-control-row">
+                                <div class="acu-label-col"><span class="acu-label-main">AI 填表后高亮表格按钮</span><span class="acu-label-sub">AI 填表后将相关表格导航按钮标为高亮</span></div>
+                                <div class="acu-input-col">
+                                    <label class="acu-switch">
+                                        <input type="checkbox" id="cfg-ai-highlight" ${config.highlightAiFilledTables ? 'checked' : ''}>
+                                        <span class="acu-slider-switch"></span>
+                                    </label>
+                                </div>
                             </div></div></div><div class="acu-section-header" data-target="sec-layout"><div class="acu-section-title"><i class="fa-solid fa-layer-group"></i> 布局与样式</div><i class="fa-solid fa-chevron-right acu-section-icon"></i></div><div class="acu-section-content" id="sec-layout"><div class="acu-settings-group"><div class="acu-control-row">
                                 <div class="acu-label-col"><span class="acu-label-main">页面布局</span></div>
                                 <div class="acu-input-col">
@@ -1536,7 +1807,13 @@ ${allTableNames.map(tName => {
         dialog.find('#cfg-collapse-pos').on('change', function() { saveConfig({ collapsePosition: $(this).val() }); renderInterface(false); });
 
         dialog.find('#cfg-limit-height').on('change', function() { saveConfig({ limitLongText: $(this).is(':checked') }); renderInterface(false); });
-        dialog.find('#cfg-custom-title').on('change', function() { 
+        dialog.find('#cfg-ai-highlight').on('change', function() {
+            const checked = $(this).is(':checked');
+            saveConfig({ highlightAiFilledTables: checked });
+            if (!checked) highlightedTableNames.clear();
+            renderInterface(false);
+        });
+        dialog.find('#cfg-custom-title').on('change', function() {
             const checked = $(this).is(':checked');
             saveConfig({ customTitleColor: checked }); 
             const $row = dialog.find('#row-title-color');
@@ -1929,6 +2206,9 @@ ${allTableNames.map(tName => {
                 'acu-btn-settings': `<button class="acu-action-btn" id="acu-btn-settings" title="全能设置"><i class="fa-solid fa-cog"></i></button>`,
                 'acu-btn-toggle': `<button class="acu-action-btn" id="acu-btn-toggle" title="${isCollapsed ? '展开' : '收起'}"><i class="fa-solid ${isCollapsed ? 'fa-chevron-up' : 'fa-chevron-down'}"></i></button>`
             };
+            if (getTableFillApi()) {
+                actionBtns['acu-btn-rollback'] = `<button class="acu-action-btn" id="acu-btn-rollback" title="AI填表回滚"><i class="fa-solid fa-rotate-left"></i></button>`;
+            }
 
             const savedActionOrder = getSavedActionOrder() || Object.keys(actionBtns);
             let finalActionOrder = savedActionOrder.filter(k => actionBtns[k]);
@@ -2000,7 +2280,8 @@ ${allTableNames.map(tName => {
                 let iconClass = getIconForTableName(name);
 
                 const isActive = currentTabName === name ? 'active' : '';
-                html += `<button class="acu-nav-btn ${isActive}" data-table="${name}"><i class="fa-solid ${iconClass}"></i><span>${name}</span></button>`;
+                const isHighlighted = highlightedTableNames.has(name) ? 'acu-nav-highlighted' : '';
+                html += `<button class="acu-nav-btn ${isActive} ${isHighlighted}" data-table="${name}"><i class="fa-solid ${iconClass}"></i><span>${name}</span></button>`;
               });
             html += `   </div>
                         <div class="acu-nav-separator"></div>
@@ -2591,14 +2872,18 @@ ${allTableNames.map(tName => {
             }
             $('.acu-nav-btn').removeClass('active');
             $(`.acu-nav-btn[data-table="${tableName}"]`).addClass('active');
+            highlightedTableNames.delete(tableName);
+            $(`.acu-nav-btn[data-table="${tableName}"]`).removeClass('acu-nav-highlighted');
             saveActiveTabState(tableName);
             bindDataAreaEvents();
           };
 
         $('.acu-nav-btn').off('click').on('click', function(e) {
-            e.stopPropagation(); 
+            e.stopPropagation();
             if (isEditingOrder) return;
             const tableName = $(this).data('table');
+            highlightedTableNames.delete(tableName);
+            $(this).removeClass('acu-nav-highlighted');
             if ($(this).hasClass('active')) { closePanel(); } else { switchTab(tableName); }
         });
         
@@ -2925,6 +3210,11 @@ ${allTableNames.map(tName => {
             if (api && api.manualUpdate) {
                 await api.manualUpdate();
             } else if (window.toastr) window.toastr.error('无法调用数据库更新接口');
+        });
+        $('#acu-btn-rollback').off('click').on('click', function(e) {
+            e.stopPropagation();
+            if (isEditingOrder) return;
+            showRollbackModal();
         });
 
         $('#send_but').off('click.acu_opt_hide').on('click.acu_opt_hide', function() {
