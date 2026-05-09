@@ -15,6 +15,8 @@
     const STORAGE_KEY_REVERSE_TABLES = 'acu_reverse_tables';
     const STORAGE_KEY_HIDDEN_TABLES = 'acu_hidden_tables';
     const STORAGE_KEY_TABLE_STYLES = 'acu_table_styles';
+    const STORAGE_KEY_LOCAL_FILL_RECORDS = 'acu_local_table_fill_records_v1';
+    const LOCAL_FILL_RECORD_LIMIT = 20;
     
     const TAB_DASHBOARD = 'acu_tab_dashboard_home';
     const STORAGE_KEY_DASH_CONFIG = 'acu_dash_config_v1';
@@ -34,6 +36,7 @@
     let cachedTableData = null;
     let isMultiSelectMode = false;
     let highlightedTableNames = new Set();
+    let pendingTableFillSnapshot = null;
 
     let hideOptionsUntilUpdate = false;
     let lastOptionDataCheck = '';
@@ -61,6 +64,8 @@
             }
             if (isEditingOrder) return;
             cachedTableData = null;
+            const nextData = _data && typeof _data === 'object' ? _data : getTableData(true);
+            recordLocalTableFillUpdate(nextData, meta);
             if (meta && meta.source === 'ai_fill' && meta.tableNames) {
                 const config = getConfig();
                 if (config.highlightAiFilledTables) {
@@ -199,6 +204,292 @@
             return `${scope}: getTableFillRecords=${typeof api.getTableFillRecords}, rollbackTableFillRecord=${typeof api.rollbackTableFillRecord}`;
         }).join('\n');
     };
+
+    const cloneForLocalRecord = (value) => {
+        if (value == null) return value;
+        try { return JSON.parse(JSON.stringify(value)); } catch (e) { return value; }
+    };
+
+    const isSheetKey = (key) => typeof key === 'string' && key.startsWith('sheet_');
+
+    const getTableFillCellText = (value) => {
+        if (value == null) return '';
+        if (typeof value === 'object') {
+            try { return JSON.stringify(value); } catch (e) { return String(value); }
+        }
+        return String(value);
+    };
+
+    const buildLocalDiffCells = (row, headers) => {
+        const cells = [];
+        const maxLen = Math.max(Array.isArray(row) ? row.length : 0, Array.isArray(headers) ? headers.length : 0);
+        for (let colIndex = 0; colIndex < maxLen; colIndex++) {
+            const value = row?.[colIndex];
+            if (value === undefined || value === null || String(value) === '') continue;
+            cells.push({
+                colIndex,
+                header: headers?.[colIndex] || `列${colIndex}`,
+                value: getTableFillCellText(value)
+            });
+        }
+        return cells;
+    };
+
+    const buildLocalTableFillDiff = (beforeTable, afterTable) => {
+        const beforeRows = Array.isArray(beforeTable?.content) ? beforeTable.content : [];
+        const afterRows = Array.isArray(afterTable?.content) ? afterTable.content : [];
+        const headers = afterRows[0] || beforeRows[0] || [];
+        const diff = {
+            addedRows: [],
+            deletedRows: [],
+            modifiedCells: [],
+            counts: { addedRows: 0, deletedRows: 0, modifiedCells: 0 }
+        };
+        const maxRows = Math.max(beforeRows.length, afterRows.length);
+        for (let rowIndex = 1; rowIndex < maxRows; rowIndex++) {
+            const beforeRow = beforeRows[rowIndex];
+            const afterRow = afterRows[rowIndex];
+            if (!beforeRow && afterRow) {
+                diff.addedRows.push({ rowIndex: rowIndex - 1, cells: buildLocalDiffCells(afterRow, headers) });
+                continue;
+            }
+            if (beforeRow && !afterRow) {
+                diff.deletedRows.push({ rowIndex: rowIndex - 1, cells: buildLocalDiffCells(beforeRow, headers) });
+                continue;
+            }
+            if (!beforeRow || !afterRow) continue;
+            const maxCols = Math.max(beforeRow.length, afterRow.length, headers.length);
+            for (let colIndex = 0; colIndex < maxCols; colIndex++) {
+                const beforeValue = getTableFillCellText(beforeRow[colIndex]);
+                const afterValue = getTableFillCellText(afterRow[colIndex]);
+                if (beforeValue !== afterValue) {
+                    diff.modifiedCells.push({
+                        rowIndex: rowIndex - 1,
+                        colIndex,
+                        header: headers[colIndex] || `列${colIndex}`,
+                        before: beforeValue,
+                        after: afterValue
+                    });
+                }
+            }
+        }
+        diff.counts = {
+            addedRows: diff.addedRows.length,
+            deletedRows: diff.deletedRows.length,
+            modifiedCells: diff.modifiedCells.length
+        };
+        return diff;
+    };
+
+    const hasLocalTableFillDiff = (diff) => {
+        const counts = diff?.counts || {};
+        return (counts.addedRows || 0) + (counts.deletedRows || 0) + (counts.modifiedCells || 0) > 0;
+    };
+
+    const inferLatestAiMessageInfo = () => {
+        try {
+            const w = window.parent || window;
+            const chat = Array.isArray(w.chat) ? w.chat : null;
+            if (!chat) return {};
+            let aiFloor = 0;
+            let latestAiIndex = -1;
+            for (let i = 0; i < chat.length; i++) {
+                if (chat[i] && !chat[i].is_user) {
+                    aiFloor++;
+                    latestAiIndex = i;
+                }
+            }
+            return latestAiIndex >= 0 ? { messageIndex: latestAiIndex, aiFloor } : {};
+        } catch (e) {
+            return {};
+        }
+    };
+
+    const findSheetKeyByName = (data, tableName) => {
+        if (!data || !tableName) return null;
+        return Object.keys(data).find(key => isSheetKey(key) && data[key]?.name === tableName) || null;
+    };
+
+    const resolveLocalChangedSheetKeys = (beforeData, afterData, meta) => {
+        const keys = new Set();
+        if (Array.isArray(meta?.modifiedKeys)) {
+            meta.modifiedKeys.forEach(key => { if (isSheetKey(key)) keys.add(key); });
+        }
+        if (Array.isArray(meta?.tableNames)) {
+            meta.tableNames.forEach(name => {
+                const key = findSheetKeyByName(afterData, name) || findSheetKeyByName(beforeData, name);
+                if (key) keys.add(key);
+            });
+        }
+        if (!keys.size) {
+            const allKeys = new Set([
+                ...Object.keys(beforeData || {}).filter(isSheetKey),
+                ...Object.keys(afterData || {}).filter(isSheetKey)
+            ]);
+            allKeys.forEach(key => {
+                if (JSON.stringify(beforeData?.[key] || null) !== JSON.stringify(afterData?.[key] || null)) {
+                    keys.add(key);
+                }
+            });
+        }
+        return Array.from(keys);
+    };
+
+    const buildLocalTableFillRecord = (beforeData, afterData, meta = {}) => {
+        if (!beforeData || !afterData) return null;
+        const changedKeys = resolveLocalChangedSheetKeys(beforeData, afterData, meta);
+        const tables = {};
+        changedKeys.forEach(sheetKey => {
+            const beforeTable = beforeData && Object.prototype.hasOwnProperty.call(beforeData, sheetKey) ? beforeData[sheetKey] : null;
+            const afterTable = afterData && Object.prototype.hasOwnProperty.call(afterData, sheetKey) ? afterData[sheetKey] : null;
+            const diff = buildLocalTableFillDiff(beforeTable, afterTable);
+            if (!hasLocalTableFillDiff(diff)) return;
+            tables[sheetKey] = {
+                sheetKey,
+                tableName: afterTable?.name || beforeTable?.name || sheetKey,
+                before: beforeTable ? cloneForLocalRecord(beforeTable) : null,
+                after: afterTable ? cloneForLocalRecord(afterTable) : null
+            };
+        });
+        const tableKeys = Object.keys(tables);
+        if (!tableKeys.length) return null;
+        const inferred = inferLatestAiMessageInfo();
+        return {
+            version: 1,
+            id: `local_fill_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            source: 'ai_fill_local',
+            localFallback: true,
+            createdAt: Date.now(),
+            messageIndex: Number.isFinite(meta?.messageIndex) ? meta.messageIndex : inferred.messageIndex,
+            aiFloor: Number.isFinite(meta?.aiFloor) ? meta.aiFloor : inferred.aiFloor,
+            mode: meta?.mode || (tableKeys.length > 1 ? 'ai_full' : 'ai_single'),
+            modifiedKeys: tableKeys,
+            tables
+        };
+    };
+
+    const loadLocalTableFillRecords = () => {
+        try {
+            const records = JSON.parse(localStorage.getItem(STORAGE_KEY_LOCAL_FILL_RECORDS));
+            return Array.isArray(records) ? records.filter(record => record && record.id) : [];
+        } catch (e) {
+            return [];
+        }
+    };
+
+    const saveLocalTableFillRecords = (records) => {
+        let limited = records.slice(0, LOCAL_FILL_RECORD_LIMIT);
+        while (limited.length >= 0) {
+            try {
+                localStorage.setItem(STORAGE_KEY_LOCAL_FILL_RECORDS, JSON.stringify(limited));
+                return true;
+            } catch (e) {
+                if (!limited.length) return false;
+                limited = limited.slice(0, -1);
+            }
+        }
+        return false;
+    };
+
+    const appendLocalTableFillRecord = (record) => {
+        if (!record) return false;
+        const records = loadLocalTableFillRecords().filter(item => item.id !== record.id);
+        return saveLocalTableFillRecords([record, ...records]);
+    };
+
+    const summarizeLocalTableFillRecord = (record) => {
+        const tableEntries = record?.tables && typeof record.tables === 'object' ? record.tables : {};
+        const tables = Object.keys(tableEntries).map(sheetKey => {
+            const entry = tableEntries[sheetKey] || {};
+            return {
+                sheetKey,
+                tableName: entry.tableName || entry.after?.name || entry.before?.name || sheetKey,
+                diff: buildLocalTableFillDiff(entry.before, entry.after)
+            };
+        });
+        return {
+            id: record.id,
+            version: record.version || 1,
+            source: record.source || 'ai_fill_local',
+            localFallback: true,
+            createdAt: record.createdAt || 0,
+            messageIndex: Number.isFinite(record.messageIndex) ? record.messageIndex : undefined,
+            aiFloor: Number.isFinite(record.aiFloor) ? record.aiFloor : undefined,
+            mode: record.mode || '',
+            modifiedKeys: Array.isArray(record.modifiedKeys) ? record.modifiedKeys : tables.map(t => t.sheetKey),
+            tableNames: tables.map(t => t.tableName),
+            tables
+        };
+    };
+
+    const getLocalTableFillRecords = () => {
+        return loadLocalTableFillRecords()
+            .map(summarizeLocalTableFillRecord)
+            .sort((a, b) => {
+                const floorDelta = (b.aiFloor || 0) - (a.aiFloor || 0);
+                if (floorDelta) return floorDelta;
+                return (b.createdAt || 0) - (a.createdAt || 0);
+            });
+    };
+
+    const getLocalTableFillApi = () => {
+        const api = getCore().getDB();
+        if (!api || typeof api.exportTableAsJson !== 'function' || typeof api.importTableAsJson !== 'function') return false;
+        return {
+            localFallback: true,
+            getTableFillRecords: getLocalTableFillRecords,
+            rollbackTableFillRecord: rollbackLocalTableFillRecord
+        };
+    };
+
+    const getTableFillRollbackApi = () => getTableFillApi() || getLocalTableFillApi();
+
+    const beginLocalTableFillCapture = (data) => {
+        if (getTableFillApi()) return;
+        pendingTableFillSnapshot = cloneForLocalRecord(data);
+    };
+
+    const recordLocalTableFillUpdate = (afterData, meta) => {
+        if (getTableFillApi() || !getLocalTableFillApi()) {
+            pendingTableFillSnapshot = null;
+            return;
+        }
+        const isAiFill = meta && meta.source === 'ai_fill';
+        if (!isAiFill && !pendingTableFillSnapshot) return;
+        const beforeData = pendingTableFillSnapshot || loadSnapshot();
+        pendingTableFillSnapshot = null;
+        const record = buildLocalTableFillRecord(beforeData, afterData, meta || {});
+        if (record) appendLocalTableFillRecord(record);
+    };
+
+    async function rollbackLocalTableFillRecord(options = {}) {
+        const recordId = typeof options === 'string' ? options : options.recordId;
+        const sheetKey = typeof options === 'object' ? options.sheetKey : null;
+        const record = loadLocalTableFillRecords().find(item => item.id === recordId);
+        if (!record) return { success: false, error: '未找到本地填表记录。' };
+        const recordTables = record.tables && typeof record.tables === 'object' ? record.tables : {};
+        const targetKeys = sheetKey ? [sheetKey] : (Array.isArray(record.modifiedKeys) && record.modifiedKeys.length ? record.modifiedKeys : Object.keys(recordTables));
+        const validKeys = targetKeys.filter(key => recordTables[key]);
+        if (!validKeys.length) return { success: false, error: '填表记录中没有可回滚的表格。' };
+        const currentData = getTableData(true);
+        if (!currentData) return { success: false, error: '无法读取当前表格数据。' };
+        const nextData = cloneForLocalRecord(currentData);
+        validKeys.forEach(key => {
+            const before = recordTables[key]?.before;
+            if (before) nextData[key] = cloneForLocalRecord(before);
+            else delete nextData[key];
+        });
+        const success = await saveDataToDatabase(nextData, false, false);
+        if (!success) return { success: false, error: '数据库导入失败。' };
+        return {
+            success: true,
+            recordId: record.id,
+            messageIndex: record.messageIndex,
+            aiFloor: record.aiFloor,
+            rolledBackKeys: validKeys,
+            tableNames: validKeys.map(key => recordTables[key]?.tableName || key)
+        };
+    }
 
     const getIconForTableName = (name) => {
         if (!name) return 'fa-table';
@@ -1004,7 +1295,7 @@
     };
 
     const showRollbackModal = () => {
-        const api = getTableFillApi();
+        const api = getTableFillRollbackApi();
         if (!api) {
             alert(`当前数据库插件版本不支持 AI 填表回滚功能。\n\n${describeTableFillApiStatus()}`);
             return;
@@ -1015,7 +1306,7 @@
 
         const records = api.getTableFillRecords();
         if (!records || records.length === 0) {
-            alert('暂无 AI 填表记录。');
+            alert(api.localFallback ? '暂无本地 AI 填表记录。\n\n发布版数据库未暴露回滚记录接口，前端只能显示它加载后捕获到的新记录。' : '暂无 AI 填表记录。');
             return;
         }
 
@@ -1101,6 +1392,9 @@
             const tables = Array.isArray(rec.tables) ? rec.tables : [];
             const totalSheets = tables.length;
             const recordId = rec.id || idx;
+            const recordTitle = rec.aiFloor != null
+                ? '第 ' + rec.aiFloor + ' 楼'
+                : (rec.messageIndex != null ? '第 ' + (rec.messageIndex + 1) + ' 楼' : '本地记录 #' + (idx + 1));
 
             let sheetRows = '';
             tables.forEach(t => {
@@ -1156,8 +1450,8 @@
             <div class="acu-rb-record">
                 <div class="acu-rb-rec-header" data-rec="${recordId}">
                     <div class="acu-rb-rec-info">
-                        <span class="acu-rb-rec-title">${escapeHtml(rec.aiFloor != null ? '第 ' + rec.aiFloor + ' 楼' : '第 ' + (rec.messageIndex + 1) + ' 楼')}</span>
-                        <span class="acu-rb-rec-meta">${formatTime(rec.createdAt)} · ${modeLabels[rec.mode] || rec.mode || '未知模式'} · ${totalSheets} 张表</span>
+                        <span class="acu-rb-rec-title">${escapeHtml(recordTitle)}</span>
+                        <span class="acu-rb-rec-meta">${formatTime(rec.createdAt)} · ${modeLabels[rec.mode] || rec.mode || '未知模式'} · ${totalSheets} 张表${rec.localFallback ? ' · 本地记录' : ''}</span>
                     </div>
                     <div class="acu-rb-rec-actions">
                         <button class="acu-rb-btn danger acu-rb-rollback-all" data-rec="${recordId}" onclick="event.stopPropagation()">回滚整楼</button>
@@ -1570,9 +1864,11 @@
                                     </label>
                                 </div>
                             </div>
-                            ${!getTableFillApi() ? `<div class="acu-control-row" style="opacity:0.7">
-                                <div class="acu-label-col"><span class="acu-label-main" style="color:#e67e22;">AI 填表回滚不可用</span><span class="acu-label-sub">当前数据库插件版本不支持，需更新插件才能使用回滚与记录查看</span></div>
-                            </div>` : ''}
+                            ${!getTableFillRollbackApi() ? `<div class="acu-control-row" style="opacity:0.7">
+                                <div class="acu-label-col"><span class="acu-label-main" style="color:#e67e22;">AI 填表回滚不可用</span><span class="acu-label-sub">当前数据库插件缺少回滚接口，且缺少导出/导入能力</span></div>
+                            </div>` : (!getTableFillApi() ? `<div class="acu-control-row" style="opacity:0.7">
+                                <div class="acu-label-col"><span class="acu-label-main" style="color:#e67e22;">AI 填表回滚使用本地记录</span><span class="acu-label-sub">可回滚可视化前端加载后捕获到的最新 ${LOCAL_FILL_RECORD_LIMIT} 条填表记录</span></div>
+                            </div>` : '')}
                             </div></div></div><div class="acu-section-header" data-target="sec-layout"><div class="acu-section-title"><i class="fa-solid fa-layer-group"></i> 布局与样式</div><i class="fa-solid fa-chevron-right acu-section-icon"></i></div><div class="acu-section-content" id="sec-layout"><div class="acu-settings-group"><div class="acu-control-row">
                                 <div class="acu-label-col"><span class="acu-label-main">页面布局</span></div>
                                 <div class="acu-input-col">
@@ -2219,7 +2515,7 @@ ${allTableNames.map(tName => {
 
             const isAlreadyVisible = $('#acu-data-area').hasClass('visible');
 
-            const hasRollbackApi = getTableFillApi();
+            const hasRollbackApi = getTableFillRollbackApi();
             const actionBtns = {
                 'acu-btn-open-db': `<button class="acu-action-btn" id="acu-btn-open-db" title="打开数据库首页"><i class="fa-solid fa-database"></i></button>`,
                 'acu-btn-open-visualizer': `<button class="acu-action-btn" id="acu-btn-open-visualizer" title="打开表格编辑器"><i class="fa-solid fa-table-cells"></i></button>`,
@@ -2227,8 +2523,8 @@ ${allTableNames.map(tName => {
                 'acu-btn-settings': `<button class="acu-action-btn" id="acu-btn-settings" title="全能设置"><i class="fa-solid fa-cog"></i></button>`,
                 'acu-btn-toggle': `<button class="acu-action-btn" id="acu-btn-toggle" title="${isCollapsed ? '展开' : '收起'}"><i class="fa-solid ${isCollapsed ? 'fa-chevron-up' : 'fa-chevron-down'}"></i></button>`,
                 'acu-btn-rollback': hasRollbackApi
-                    ? `<button class="acu-action-btn" id="acu-btn-rollback" title="AI填表回滚"><i class="fa-solid fa-rotate-left"></i></button>`
-                    : `<button class="acu-action-btn" id="acu-btn-rollback" title="AI填表回滚——当前数据库插件版本不支持" style="opacity:0.4;cursor:not-allowed;"><i class="fa-solid fa-rotate-left"></i></button>`
+                    ? `<button class="acu-action-btn" id="acu-btn-rollback" title="${hasRollbackApi.localFallback ? 'AI填表回滚——本地记录' : 'AI填表回滚'}"><i class="fa-solid fa-rotate-left"></i></button>`
+                    : `<button class="acu-action-btn" id="acu-btn-rollback" title="AI填表回滚——当前环境不可用" style="opacity:0.4;cursor:not-allowed;"><i class="fa-solid fa-rotate-left"></i></button>`
             };
 
             const savedActionOrder = getSavedActionOrder() || Object.keys(actionBtns);
@@ -3235,8 +3531,8 @@ ${allTableNames.map(tName => {
         $('#acu-btn-rollback').off('click').on('click', function(e) {
             e.stopPropagation();
             if (isEditingOrder) return;
-            if (!getTableFillApi()) {
-                alert(`当前数据库插件版本不支持 AI 填表回滚功能。\n\n${describeTableFillApiStatus()}`);
+            if (!getTableFillRollbackApi()) {
+                alert(`当前环境无法使用 AI 填表回滚功能。\n\n${describeTableFillApiStatus()}`);
                 return;
             }
             showRollbackModal();
@@ -3872,7 +4168,7 @@ ${allTableNames.map(tName => {
                  const api = getCore().getDB();
                  if (api.registerTableUpdateCallback) {
                      api.registerTableUpdateCallback(UpdateController.handleUpdate);
-                     if (api.registerTableFillStartCallback) { api.registerTableFillStartCallback(() => { const c = api.exportTableAsJson(); if (c) saveSnapshot(c); }); }
+                     if (api.registerTableFillStartCallback) { api.registerTableFillStartCallback(() => { const c = api.exportTableAsJson(); if (c) { saveSnapshot(c); beginLocalTableFillCapture(c); } }); }
                  }
                  isInitialized = true;
              } else setTimeout(loop, 1000);
