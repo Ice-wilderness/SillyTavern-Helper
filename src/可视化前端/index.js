@@ -1553,6 +1553,10 @@
                                         <span class="acu-slider-switch"></span>
                                     </label>
                                 </div>
+                            </div>
+                            ${!getTableFillApi() ? `<div class="acu-control-row" style="opacity:0.7">
+                                <div class="acu-label-col"><span class="acu-label-main" style="color:#e67e22;">AI 填表回滚不可用</span><span class="acu-label-sub">当前数据库插件版本不支持，需更新插件才能使用回滚与记录查看</span></div>
+                            </div>` : ''}
                             </div></div></div><div class="acu-section-header" data-target="sec-layout"><div class="acu-section-title"><i class="fa-solid fa-layer-group"></i> 布局与样式</div><i class="fa-solid fa-chevron-right acu-section-icon"></i></div><div class="acu-section-content" id="sec-layout"><div class="acu-settings-group"><div class="acu-control-row">
                                 <div class="acu-label-col"><span class="acu-label-main">页面布局</span></div>
                                 <div class="acu-input-col">
@@ -2199,16 +2203,17 @@ ${allTableNames.map(tName => {
 
             const isAlreadyVisible = $('#acu-data-area').hasClass('visible');
 
+            const hasRollbackApi = getTableFillApi();
             const actionBtns = {
                 'acu-btn-open-db': `<button class="acu-action-btn" id="acu-btn-open-db" title="打开数据库首页"><i class="fa-solid fa-database"></i></button>`,
                 'acu-btn-open-visualizer': `<button class="acu-action-btn" id="acu-btn-open-visualizer" title="打开表格编辑器"><i class="fa-solid fa-table-cells"></i></button>`,
                 'acu-btn-manual-update': `<button class="acu-action-btn" id="acu-btn-manual-update" title="立即手动更新"><i class="fa-solid fa-bolt"></i></button>`,
                 'acu-btn-settings': `<button class="acu-action-btn" id="acu-btn-settings" title="全能设置"><i class="fa-solid fa-cog"></i></button>`,
-                'acu-btn-toggle': `<button class="acu-action-btn" id="acu-btn-toggle" title="${isCollapsed ? '展开' : '收起'}"><i class="fa-solid ${isCollapsed ? 'fa-chevron-up' : 'fa-chevron-down'}"></i></button>`
+                'acu-btn-toggle': `<button class="acu-action-btn" id="acu-btn-toggle" title="${isCollapsed ? '展开' : '收起'}"><i class="fa-solid ${isCollapsed ? 'fa-chevron-up' : 'fa-chevron-down'}"></i></button>`,
+                'acu-btn-rollback': hasRollbackApi
+                    ? `<button class="acu-action-btn" id="acu-btn-rollback" title="AI填表回滚"><i class="fa-solid fa-rotate-left"></i></button>`
+                    : `<button class="acu-action-btn" id="acu-btn-rollback" title="AI填表回滚——当前数据库插件版本不支持" style="opacity:0.4;cursor:not-allowed;"><i class="fa-solid fa-rotate-left"></i></button>`
             };
-            if (getTableFillApi()) {
-                actionBtns['acu-btn-rollback'] = `<button class="acu-action-btn" id="acu-btn-rollback" title="AI填表回滚"><i class="fa-solid fa-rotate-left"></i></button>`;
-            }
 
             const savedActionOrder = getSavedActionOrder() || Object.keys(actionBtns);
             let finalActionOrder = savedActionOrder.filter(k => actionBtns[k]);
@@ -3214,6 +3219,10 @@ ${allTableNames.map(tName => {
         $('#acu-btn-rollback').off('click').on('click', function(e) {
             e.stopPropagation();
             if (isEditingOrder) return;
+            if (!getTableFillApi()) {
+                alert('当前数据库插件版本不支持 AI 填表回滚功能。\n\n需要更新数据库插件到包含 getTableFillRecords / rollbackTableFillRecord API 的版本。');
+                return;
+            }
             showRollbackModal();
         });
 
