@@ -34,7 +34,6 @@
     let cachedTableData = null;
     let isMultiSelectMode = false;
     let highlightedTableNames = new Set();
-    let tableFillApiAvailable = null;
 
     let hideOptionsUntilUpdate = false;
     let lastOptionDataCheck = '';
@@ -174,13 +173,10 @@
     };
 
     const getTableFillApi = () => {
-        if (tableFillApiAvailable !== null) return tableFillApiAvailable;
         const api = getCore().getDB();
         if (api && typeof api.getTableFillRecords === 'function' && typeof api.rollbackTableFillRecord === 'function') {
-            tableFillApiAvailable = api;
             return api;
         }
-        tableFillApiAvailable = false;
         return false;
     };
 
