@@ -172,12 +172,32 @@
         };
     };
 
+    const getTableFillApiCandidates = () => {
+        const candidates = [];
+        const pushApi = (scope, api) => {
+            if (!api || candidates.some(item => item.api === api)) return;
+            candidates.push({ scope, api });
+        };
+        try { pushApi('父窗口', window.parent && window.parent.AutoCardUpdaterAPI); } catch (e) {}
+        try { pushApi('当前窗口', window.AutoCardUpdaterAPI); } catch (e) {}
+        return candidates;
+    };
+
+    const isTableFillApiAvailable = (api) => {
+        return !!api && typeof api.getTableFillRecords === 'function' && typeof api.rollbackTableFillRecord === 'function';
+    };
+
     const getTableFillApi = () => {
-        const api = getCore().getDB();
-        if (api && typeof api.getTableFillRecords === 'function' && typeof api.rollbackTableFillRecord === 'function') {
-            return api;
-        }
-        return false;
+        const match = getTableFillApiCandidates().find(item => isTableFillApiAvailable(item.api));
+        return match ? match.api : false;
+    };
+
+    const describeTableFillApiStatus = () => {
+        const candidates = getTableFillApiCandidates();
+        if (!candidates.length) return '未检测到 AutoCardUpdaterAPI。';
+        return candidates.map(({ scope, api }) => {
+            return `${scope}: getTableFillRecords=${typeof api.getTableFillRecords}, rollbackTableFillRecord=${typeof api.rollbackTableFillRecord}`;
+        }).join('\n');
     };
 
     const getIconForTableName = (name) => {
@@ -986,7 +1006,7 @@
     const showRollbackModal = () => {
         const api = getTableFillApi();
         if (!api) {
-            alert('当前数据库插件版本不支持 AI 填表回滚功能。');
+            alert(`当前数据库插件版本不支持 AI 填表回滚功能。\n\n${describeTableFillApiStatus()}`);
             return;
         }
         const { $ } = getCore();
@@ -3216,7 +3236,7 @@ ${allTableNames.map(tName => {
             e.stopPropagation();
             if (isEditingOrder) return;
             if (!getTableFillApi()) {
-                alert('当前数据库插件版本不支持 AI 填表回滚功能。\n\n需要更新数据库插件到包含 getTableFillRecords / rollbackTableFillRecord API 的版本。');
+                alert(`当前数据库插件版本不支持 AI 填表回滚功能。\n\n${describeTableFillApiStatus()}`);
                 return;
             }
             showRollbackModal();
