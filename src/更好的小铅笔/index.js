@@ -17,6 +17,10 @@
     EDITOR_APPEAR_TIMEOUT: 5000,
     SCROLL_INTO_VIEW_OFFSET: 120,
     EDITOR_SCROLL_ALIGNMENT_RATIO: 0.3,
+    LCS_MIN_SIMILARITY: 0.6,
+    LCS_MIN_NEEDLE_LENGTH: 10,
+    LCS_MAX_NEEDLE: 200,
+    LCS_MAX_HAYSTACK: 20000,
     SELECTORS: {
       MESSAGE: '.mes',
       EDIT_BUTTONS: ['.mes_edit', '.fa-edit', '.fa-pencil'],
@@ -53,6 +57,8 @@
   let floatingButton = null;
   let settingsRoot = null;
   let settingsStyle = null;
+  let settingsRenderRetryTimer = null;
+  let settingsHostObserver = null;
   let isHandlingEdit = false;
   let savedScrollTop = null;
   let scrollContainer = null;
@@ -75,6 +81,10 @@
 
   function getJQuery() {
     return window.$ || window.parent?.$;
+  }
+
+  function getToastr() {
+    return window.parent?.toastr || window.toastr;
   }
 
   function readScriptVariables() {
@@ -640,6 +650,7 @@
           if (!matched) {
             editor.focus();
             editor.scrollTop = 0;
+            safeCall(() => getToastr()?.warning('无法定位到选中文本，光标已置于开头'));
           }
         } else {
           editor.focus();
@@ -752,11 +763,66 @@
       if (match) return match;
     }
 
-    return null;
+    return lcsMatch(fullText, selectedText);
   }
 
   function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function lcsMatch(haystack, needle) {
+    const m = needle.length;
+    const n = haystack.length;
+
+    if (m < CONFIG.LCS_MIN_NEEDLE_LENGTH || m > CONFIG.LCS_MAX_NEEDLE) return null;
+    if (n === 0 || n > CONFIG.LCS_MAX_HAYSTACK) return null;
+
+    const cols = n + 1;
+    const dp = new Uint32Array((m + 1) * cols);
+
+    for (let i = 1; i <= m; i++) {
+      const needleChar = needle[i - 1];
+      const rowOffset = i * cols;
+      const prevRowOffset = (i - 1) * cols;
+
+      for (let j = 1; j <= n; j++) {
+        if (needleChar === haystack[j - 1]) {
+          dp[rowOffset + j] = dp[prevRowOffset + (j - 1)] + 1;
+        } else {
+          dp[rowOffset + j] = Math.max(dp[prevRowOffset + j], dp[rowOffset + (j - 1)]);
+        }
+      }
+    }
+
+    const lcsLength = dp[m * cols + n];
+    const similarity = lcsLength / m;
+    if (similarity < CONFIG.LCS_MIN_SIMILARITY) return null;
+
+    const haystackMatches = [];
+    let i = m;
+    let j = n;
+
+    while (i > 0 && j > 0) {
+      if (needle[i - 1] === haystack[j - 1]) {
+        haystackMatches.unshift(j - 1);
+        i--;
+        j--;
+      } else if (dp[(i - 1) * cols + j] > dp[i * cols + (j - 1)]) {
+        i--;
+      } else {
+        j--;
+      }
+    }
+
+    if (haystackMatches.length === 0) return null;
+
+    const start = haystackMatches[0];
+    const end = haystackMatches[haystackMatches.length - 1] + 1;
+
+    return {
+      index: start,
+      0: haystack.substring(start, end),
+    };
   }
 
   function scrollTextareaToSelection(textarea) {
@@ -1003,10 +1069,31 @@
     });
   }
 
+  function getSettingsHost() {
+    const $ = getJQuery();
+    const parentDocument = getParentDocument();
+
+    return (
+      safeCall(() => document.querySelector('#extensions_settings2'), null) ||
+      safeCall(() => parentDocument.querySelector('#extensions_settings2'), null) ||
+      safeCall(() => $('#extensions_settings2')[0], null) ||
+      safeCall(() => $(parentDocument).find('#extensions_settings2')[0], null)
+    );
+  }
+
+  function getSettingsDocument() {
+    const host = getSettingsHost();
+    return host?.ownerDocument || getParentDocument() || document;
+  }
+
   function injectSettingsStyle() {
     if (settingsStyle) return;
 
-    settingsStyle = document.createElement('style');
+    const uiDocument = getSettingsDocument();
+    const styleHost = uiDocument.head || uiDocument.documentElement;
+    if (!styleHost) return;
+
+    settingsStyle = uiDocument.createElement('style');
     settingsStyle.setAttribute(CONFIG.ATTRIBUTES.SCRIPT_ID, SCRIPT_ID);
     settingsStyle.textContent = `
       .${CONFIG.CLASSES.SETTINGS} .hint {
@@ -1019,18 +1106,33 @@
         gap: 8px;
       }
     `;
-    document.head.appendChild(settingsStyle);
+    styleHost.appendChild(settingsStyle);
   }
 
   function renderSettingsPanel() {
-    const host = document.querySelector('#extensions_settings2');
-    if (!host || settingsRoot) return;
+    const host = getSettingsHost();
 
-    settingsRoot = document.createElement('div');
+    if (!host) {
+      scheduleSettingsRenderRetry();
+      return;
+    }
+
+    if (settingsRoot && settingsRoot.isConnected) return;
+
+    clearTimeout(settingsRenderRetryTimer);
+    settingsRenderRetryTimer = null;
+    settingsHostObserver?.disconnect();
+    settingsHostObserver = null;
+
+    injectSettingsStyle();
+
+    const uiDocument = host.ownerDocument || getSettingsDocument();
+    settingsRoot = uiDocument.createElement('div');
     settingsRoot.setAttribute(CONFIG.ATTRIBUTES.SCRIPT_ID, SCRIPT_ID);
     settingsRoot.className = CONFIG.CLASSES.SETTINGS;
 
-    const checkboxId = `show-button-checkbox-${SCRIPT_ID}`;
+    const safeScriptId = String(SCRIPT_ID).replace(/[^\w-]/g, '-');
+    const checkboxId = `show-button-checkbox-${safeScriptId}`;
     settingsRoot.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
@@ -1051,9 +1153,33 @@
     `;
 
     const checkbox = settingsRoot.querySelector('input[type="checkbox"]');
-    checkbox.addEventListener('change', (event) => setShowButton(event.target.checked));
+    checkbox?.addEventListener('change', (event) => setShowButton(event.target.checked));
 
     host.appendChild(settingsRoot);
+  }
+
+  function scheduleSettingsRenderRetry() {
+    if (settingsRenderRetryTimer) return;
+
+    settingsRenderRetryTimer = setTimeout(() => {
+      settingsRenderRetryTimer = null;
+      renderSettingsPanel();
+    }, 500);
+
+    if (settingsHostObserver) return;
+
+    const observeDocument = getParentDocument();
+    const observeTarget = observeDocument?.body || observeDocument?.documentElement;
+    if (!observeTarget) return;
+
+    settingsHostObserver = new MutationObserver(() => {
+      if (getSettingsHost()) renderSettingsPanel();
+    });
+
+    settingsHostObserver.observe(observeTarget, {
+      childList: true,
+      subtree: true,
+    });
   }
 
   function cleanup() {
@@ -1071,6 +1197,12 @@
       parentDocument.removeEventListener('mousedown', handleParentMouseDown);
       parentDocument.removeEventListener('keydown', handleShortcut);
 
+      clearTimeout(settingsRenderRetryTimer);
+      settingsRenderRetryTimer = null;
+
+      settingsHostObserver?.disconnect();
+      settingsHostObserver = null;
+
       settingsRoot?.remove();
       settingsRoot = null;
 
@@ -1087,7 +1219,6 @@
     }
 
     persistDefaultSettingsIfNeeded();
-    injectSettingsStyle();
     renderSettingsPanel();
 
     if (settings.showButton) createFloatingButton();
@@ -1100,7 +1231,10 @@
     window.addEventListener('pagehide', cleanup, { once: true });
   }
 
-  if (document.readyState === 'loading') {
+  const $ready = getJQuery();
+  if ($ready) {
+    $ready(boot);
+  } else if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot, { once: true });
   } else {
     boot();
