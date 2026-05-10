@@ -454,6 +454,146 @@ function findFlexibleMatch(
   return null;
 }
 
+function longestCommonSubstring(
+  a: string,
+  b: string,
+  minLength = 4,
+): { start: number; length: number } | null {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0 || n === 0) return null;
+
+  let prev = new Uint16Array(n + 1);
+  let curr = new Uint16Array(n + 1);
+  let maxLen = 0;
+  let endPos = 0;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        curr[j] = prev[j - 1] + 1;
+        if (curr[j] > maxLen) {
+          maxLen = curr[j];
+          endPos = i;
+        }
+      } else {
+        curr[j] = 0;
+      }
+    }
+    [prev, curr] = [curr, prev];
+  }
+
+  if (maxLen < minLength) return null;
+  return { start: endPos - maxLen, length: maxLen };
+}
+
+function findWordAnchors(
+  text: string,
+  query: string,
+): { start: number; end: number } | null {
+  const words = query
+    .split(/\s+/)
+    .filter((w) => w.length >= 3)
+    .map((w) => w.toLowerCase());
+
+  if (words.length === 0) return null;
+
+  const textLower = text.toLowerCase();
+  let firstStart = -1;
+  let lastEnd = -1;
+  let matchCount = 0;
+
+  for (const word of words) {
+    const pos = textLower.indexOf(word);
+    if (pos !== -1) {
+      matchCount++;
+      if (firstStart === -1 || pos < firstStart) firstStart = pos;
+      const wordEnd = pos + word.length;
+      if (wordEnd > lastEnd) lastEnd = wordEnd;
+    }
+  }
+
+  if (firstStart === -1) return null;
+  const minMatches = Math.max(1, Math.ceil(words.length * 0.3));
+  if (matchCount < minMatches) return null;
+
+  return { start: firstStart, end: lastEnd };
+}
+
+function findBestParagraphOffset(text: string, query: string): number {
+  const paragraphs = text.split(/\n\n+/);
+  if (paragraphs.length <= 1) return -1;
+
+  const queryWords = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length >= 3);
+
+  if (queryWords.length === 0) return -1;
+
+  let bestScore = 0;
+  let bestOffset = -1;
+  let currentOffset = 0;
+
+  for (const paragraph of paragraphs) {
+    const paraLower = paragraph.toLowerCase();
+    let score = 0;
+    for (const word of queryWords) {
+      if (paraLower.includes(word)) score++;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestOffset = currentOffset;
+    }
+
+    currentOffset += paragraph.length + 2;
+  }
+
+  return bestScore > 0 ? bestOffset : -1;
+}
+
+function applyEditorSelection(
+  editor: HTMLElement,
+  isTextarea: boolean,
+  start: number,
+  end: number,
+): boolean {
+  if (isTextarea) {
+    const textarea = editor as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(start, end);
+    scrollTextareaToMatch(textarea);
+    return true;
+  }
+
+  const range = window.parent.document.createRange();
+  const [startNode, startOffset] = findTextNodeAtOffset(editor, start);
+  const [endNode, endOffset] = findTextNodeAtOffset(editor, end);
+  if (!startNode || !endNode) return false;
+
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+
+  const selection = window.parent.getSelection();
+  if (selection) {
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  editor.focus();
+  scrollContentEditableToMatch(editor, range);
+  return true;
+}
+
+function applyEditorCursor(
+  editor: HTMLElement,
+  isTextarea: boolean,
+  offset: number,
+): boolean {
+  return applyEditorSelection(editor, isTextarea, offset, offset);
+}
+
 function selectTextInEditor(
   editor: HTMLElement,
   selectedText: string,
@@ -465,37 +605,46 @@ function selectTextInEditor(
   const query = selectedText.trim();
   if (!query) return false;
 
-  const match = findFlexibleMatch(editorText, query);
-  if (!match || match.index === undefined) return false;
-
-  const start = match.index;
-  const end = start + match[0].length;
-
-  if (isTextarea) {
-    const textarea = editor as HTMLTextAreaElement;
-    textarea.focus();
-    textarea.setSelectionRange(start, end);
-    scrollTextareaToMatch(textarea);
-  } else {
-    const range = window.parent.document.createRange();
-    const [startNode, startOffset] = findTextNodeAtOffset(editor, start);
-    const [endNode, endOffset] = findTextNodeAtOffset(editor, end);
-    if (!startNode || !endNode) return false;
-
-    range.setStart(startNode, startOffset);
-    range.setEnd(endNode, endOffset);
-
-    const selection = window.parent.getSelection();
-    if (selection) {
-      selection.removeAllRanges();
-      selection.addRange(range);
-    }
-
-    editor.focus();
-    scrollContentEditableToMatch(editor, range);
+  // Layer 1: Exact & markdown-tolerant match
+  const exactMatch = findFlexibleMatch(editorText, query);
+  if (exactMatch && exactMatch.index !== undefined) {
+    return applyEditorSelection(
+      editor,
+      isTextarea,
+      exactMatch.index,
+      exactMatch.index + exactMatch[0].length,
+    );
   }
 
-  return true;
+  // Layer 2a: Longest common substring
+  const lcs = longestCommonSubstring(editorText, query, 5);
+  if (lcs && lcs.length >= Math.max(5, query.length * 0.3)) {
+    return applyEditorSelection(
+      editor,
+      isTextarea,
+      lcs.start,
+      lcs.start + lcs.length,
+    );
+  }
+
+  // Layer 2b: Word anchoring
+  const wordAnchors = findWordAnchors(editorText, query);
+  if (wordAnchors) {
+    return applyEditorSelection(
+      editor,
+      isTextarea,
+      wordAnchors.start,
+      wordAnchors.end,
+    );
+  }
+
+  // Layer 3: Paragraph match — place cursor at best paragraph start
+  const paragraphOffset = findBestParagraphOffset(editorText, query);
+  if (paragraphOffset >= 0) {
+    return applyEditorCursor(editor, isTextarea, paragraphOffset);
+  }
+
+  return false;
 }
 
 function scrollTextareaToMatch(textarea: HTMLTextAreaElement) {
