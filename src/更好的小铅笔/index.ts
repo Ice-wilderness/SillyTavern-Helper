@@ -235,7 +235,7 @@ function destroyFloatingButton() {
 }
 
 function getCurrentTargetMessage(): {
-  target: JQuery<HTMLElement> | null;
+  target: JQuery<Element> | null;
   selectedText: string;
 } {
   const activeEditor = $(window.parent.document).find(
@@ -271,7 +271,7 @@ function getCurrentTargetMessage(): {
 }
 
 function clickFirstVisibleEditButton(
-  message: JQuery<HTMLElement>,
+  message: JQuery<Element>,
   selectors: readonly string[],
 ): boolean {
   for (const selector of selectors) {
@@ -724,7 +724,7 @@ function scrollContentEditableToMatch(editor: HTMLElement, range: Range) {
   }
 }
 
-function handleF8(event: KeyboardEvent) {
+function handleF8(event: JQuery.KeyDownEvent) {
   if (event.key === "F8") {
     event.preventDefault();
     setTimeout(toggleEditing, 0);
@@ -752,7 +752,7 @@ function handleDocumentMouseDown(event: JQuery.MouseDownEvent) {
   finishEditing(message);
 }
 
-function finishEditing(message: JQuery<HTMLElement>) {
+function finishEditing(message: JQuery<Element>) {
   const doneButton = message.find(CONSTANTS.SELECTORS.DONE_BUTTON);
 
   if (!doneButton.length) {
@@ -799,7 +799,7 @@ function finishEditing(message: JQuery<HTMLElement>) {
   }, 10);
 }
 
-function messageHasEditor(message: JQuery<HTMLElement>): boolean {
+function messageHasEditor(message: JQuery<Element>): boolean {
   return message.find(CONSTANTS.SELECTORS.EDITOR).length > 0;
 }
 
